@@ -19,7 +19,7 @@ This installs:
 Create a `.env` file with your API keys:
 
 ```bash
-cp sample.env .env
+cp .env.example .env
 ```
 
 Edit `.env` and add:
