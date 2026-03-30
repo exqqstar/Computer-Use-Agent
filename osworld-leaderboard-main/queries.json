@@ -1,0 +1,6 @@
+[
+    {
+        "name": "Success Rate",
+        "query": "SELECT participants->>'$.agent' AS id, CONCAT(ROUND(results[1].success_rate * 100, 1), '%') AS \"Success Rate\" FROM results ORDER BY results[1].success_rate DESC"
+    }
+]

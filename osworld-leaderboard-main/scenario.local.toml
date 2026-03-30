@@ -1,0 +1,20 @@
+[green_agent]
+image = "ghcr.io/rdi-foundation/osworld-green:latest"
+env = {}
+
+[[participants]]
+image = "ghcr.io/rdi-foundation/osworld-purple:latest"
+name = "agent"
+
+[participants.env]
+MAX_CONTEXTS = "5"
+
+[config]
+test_all_meta_name = "test_small"
+num_shards = 1
+shard_index = 0
+num_workers = 1
+max_steps = 15
+action_space = "pyautogui"
+observation_type = "screenshot"
+sleep_after_execution = 0.0

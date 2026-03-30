@@ -1,0 +1,466 @@
+# Reusable workflow - called from leaderboard repos via quick-submit.yml (@v1).
+# After making changes, move the tag so leaderboard repos using @v1 pick up the update:
+#   git tag -f v1 && git push origin v1 --force
+
+name: Quick-Submit Amber Runner
+
+on:
+  workflow_call:
+    inputs:
+      backend_url:
+        description: Agentbeats backend base URL for this quick-submit run
+        required: false
+        type: string
+      num_shards:
+        description: Number of parallel shards to run (default 1)
+        required: false
+        type: number
+    secrets:
+      GREEN_SECRETS_JSON:
+        description: Optional JSON object mapping green config key -> secret value.
+        required: false
+
+env:
+  NUM_SHARDS: ${{ inputs.num_shards || 1 }}
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      shard_indices: ${{ steps.gen.outputs.shard_indices }}
+    steps:
+      - id: gen
+        run: echo "shard_indices=$(seq 0 $(( ${{ inputs.num_shards || 1 }} - 1 )) | jq -sc .)" >> "$GITHUB_OUTPUT"
+
+  run:
+    needs: setup
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    strategy:
+      matrix:
+        shard_index: ${{ fromJson(needs.setup.outputs.shard_indices) }}
+
+    env:
+      RESULTS_TIMEOUT_MINUTES: ${{ vars.QUICK_SUBMIT_TIMEOUT_MINUTES || '30' }}
+      AMBER_IMAGE: ghcr.io/rdi-foundation/amber-cli:v0.3
+      AMBER_COMPOSE_DIR: amber-compose
+      AMBER_COMPOSE_PROJECT: amber-quick-submit-${{ github.run_id }}-${{ github.run_attempt }}
+      AMBER_PROXY_PORT: "18080"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: Resolve submission ID
+        id: submission
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref_name="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}"
+          if [[ "$ref_name" =~ ^quick-submit-([0-9a-fA-F-]{36})$ ]]; then
+            echo "submission_id=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Unable to derive submission ID from branch: $ref_name" >&2
+          exit 1
+
+      - name: Find scenario file
+        id: scenario
+        shell: bash
+        env:
+          SUBMISSION_ID: ${{ steps.submission.outputs.submission_id }}
+        run: |
+          set -euo pipefail
+          scenario=$(ls submissions/*"${SUBMISSION_ID}"*.json 2>/dev/null | grep -v provenance | head -1)
+          if [[ -z "$scenario" ]]; then
+            echo "No scenario file found for submission ${SUBMISSION_ID}" >&2
+            exit 1
+          fi
+          base=$(basename "$scenario" .json)
+          echo "path=$scenario" >> "$GITHUB_OUTPUT"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+
+      - name: Export repo-owned green secrets
+        shell: bash
+        env:
+          GREEN_SECRETS_JSON: ${{ secrets.GREEN_SECRETS_JSON }}
+          SUBMITTER_GREEN_KEYS_JSON: ${{ steps.submitter-secrets.outputs.green_keys_json }}
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const crypto = require('crypto');
+          const fs = require('fs');
+          const raw = process.env.GREEN_SECRETS_JSON?.trim();
+          if (!raw) {
+            console.log('No repo-owned green secrets configured');
+            process.exit(0);
+          }
+
+          let greenSecrets;
+          try {
+            greenSecrets = JSON.parse(raw);
+          } catch (error) {
+            throw new Error(`GREEN_SECRETS_JSON must be valid JSON: ${error.message}`);
+          }
+          if (!greenSecrets || typeof greenSecrets !== 'object' || Array.isArray(greenSecrets)) {
+            throw new Error('GREEN_SECRETS_JSON must be a JSON object');
+          }
+
+          const submitterGreenKeys = new Set(
+            JSON.parse(process.env.SUBMITTER_GREEN_KEYS_JSON || '[]').map((key) =>
+              String(key).toLowerCase()
+            )
+          );
+          const envFile = process.env.GITHUB_ENV;
+          const configKeyPattern = /^[a-z][a-z0-9_]*$/;
+
+          function appendEnv(name, value) {
+            const delimiter = `__AGENTBEATS_${crypto.randomUUID()}__`;
+            fs.appendFileSync(envFile, `${name}<<${delimiter}\n${value}\n${delimiter}\n`);
+          }
+
+          let exportCount = 0;
+          for (const [configKey, value] of Object.entries(greenSecrets)) {
+            if (!configKeyPattern.test(configKey)) {
+              throw new Error(
+                `invalid green config key ${JSON.stringify(configKey)}; expected ^[a-z][a-z0-9_]*$`
+              );
+            }
+            if (typeof value !== 'string') {
+              throw new Error(`GREEN_SECRETS_JSON value for green.${configKey} must be a string`);
+            }
+            if (submitterGreenKeys.has(configKey)) {
+              throw new Error(
+                `repo-owned binding for green.${configKey} collides with a submitter-provided green secret`
+              );
+            }
+            console.log(`::add-mask::${value}`);
+            appendEnv(`AMBER_CONFIG_GREEN_${configKey.toUpperCase()}`, value);
+            exportCount += 1;
+          }
+
+          console.log(`Exported ${exportCount} repo-owned green secrets`);
+          NODE
+
+      - name: Install Amber CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull "${AMBER_IMAGE}"
+          cid="$(docker create "${AMBER_IMAGE}")"
+          cleanup() {
+            docker rm "${cid}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          install -d "${RUNNER_TEMP}/bin"
+          docker cp "${cid}:/amber" "${RUNNER_TEMP}/bin/amber"
+          chmod +x "${RUNNER_TEMP}/bin/amber"
+          echo "${RUNNER_TEMP}/bin" >> "${GITHUB_PATH}"
+          "${RUNNER_TEMP}/bin/amber" --help >/dev/null
+
+      - name: Patch scenario with shard config
+        shell: bash
+        env:
+          SHARD_INDEX: ${{ matrix.shard_index }}
+          NUM_SHARDS: ${{ env.NUM_SHARDS }}
+          SCENARIO_PATH: ${{ steps.scenario.outputs.path }}
+        run: |
+          set -euo pipefail
+          # Inject shard_index and num_shards into the gateway's assessment_config,
+          # which the gateway forwards to the green agent's EvalRequest config.
+          jq --argjson shard_index "$SHARD_INDEX" --argjson num_shards "$NUM_SHARDS" \
+            '.components.gateway.config.assessment_config.shard_index = $shard_index |
+             .components.gateway.config.assessment_config.num_shards = $num_shards' \
+            "$SCENARIO_PATH" > scenario-shard.json
+
+      - name: Compile scenario
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "${AMBER_COMPOSE_DIR}"
+          amber compile scenario-shard.json \
+            --output scenario-ir.json \
+            --docker-compose "${AMBER_COMPOSE_DIR}"
+          if ! jq -e '.exports[] | select(.name == "results" and .capability.kind == "http")' scenario-ir.json > /dev/null; then
+            echo "Scenario must export an HTTP capability named 'results'" >&2
+            exit 1
+          fi
+          if jq -e '.. | objects | select(.kind? == "docker")' scenario-ir.json > /dev/null; then
+            if [[ ! -S /var/run/docker.sock ]]; then
+              echo "Scenario uses framework.docker but /var/run/docker.sock is unavailable" >&2
+              exit 1
+            fi
+            echo "Scenario uses framework.docker; exporting /var/run/docker.sock to Docker Compose"
+            echo "AMBER_DOCKER_SOCK=/var/run/docker.sock" >> "${GITHUB_ENV}"
+          else
+            echo "Scenario does not use framework.docker"
+          fi
+
+      - name: Patch docker-compose for KVM
+        run: |
+          # amber-cli doesn't support KVM passthrough, so we patch the generated compose.
+          # Add /dev/kvm device and its GID to the green component service (identified by amber_component_moniker label).
+          green_service=$(yq '.services | to_entries | map(select(.value.labels.amber_component_moniker == "/green")) | .[0].key' "${AMBER_COMPOSE_DIR}/compose.yaml")
+          kvm_gid=$(stat -c %g /dev/kvm)
+          yq -i \
+            ".services[\"${green_service}\"].devices = [\"/dev/kvm:/dev/kvm\"] |
+             .services[\"${green_service}\"].group_add = [\"${kvm_gid}\"]" \
+            "${AMBER_COMPOSE_DIR}/compose.yaml"
+
+      - name: Run scenario
+        shell: bash
+        run: |
+          set -euo pipefail
+          compose=(docker compose -f "${AMBER_COMPOSE_DIR}/compose.yaml" -p "${AMBER_COMPOSE_PROJECT}")
+          proxy_pid=""
+          logs_pid=""
+          cleanup() {
+            exit_code=$?
+            if [[ -n "${proxy_pid}" ]]; then
+              kill "${proxy_pid}" >/dev/null 2>&1 || true
+              wait "${proxy_pid}" >/dev/null 2>&1 || true
+            fi
+            if [[ -n "${logs_pid}" ]]; then
+              kill "${logs_pid}" >/dev/null 2>&1 || true
+              wait "${logs_pid}" >/dev/null 2>&1 || true
+            fi
+            if [[ ${exit_code} -ne 0 ]]; then
+              echo "Amber proxy log:" >&2
+              [[ -f amber-proxy.log ]] && cat amber-proxy.log >&2 || true
+              echo "Compose status:" >&2
+              "${compose[@]}" ps >&2 || true
+            fi
+            exit "${exit_code}"
+          }
+          trap cleanup EXIT
+
+          "${compose[@]}" up -d
+          "${compose[@]}" logs -f --no-color &
+          logs_pid=$!
+
+          amber proxy "${AMBER_COMPOSE_DIR}" \
+            --project-name "${AMBER_COMPOSE_PROJECT}" \
+            --export "results=127.0.0.1:${AMBER_PROXY_PORT}" > amber-proxy.log 2>&1 &
+          proxy_pid=$!
+
+          poll_url="http://127.0.0.1:${AMBER_PROXY_PORT}/"
+          echo "Polling ${poll_url}..."
+          status=""
+          deadline=$((SECONDS + (60 * RESULTS_TIMEOUT_MINUTES)))
+          while (( SECONDS < deadline )); do
+            if ! kill -0 "${proxy_pid}" >/dev/null 2>&1; then
+              echo "amber proxy exited unexpectedly" >&2
+              exit 1
+            fi
+            response="$(curl -fsS "${poll_url}" || true)"
+            if [[ -z "${response}" ]]; then
+              sleep 5
+              continue
+            fi
+            status="$(jq -r '.status // empty' <<<"${response}")"
+            if [[ -z "${status}" ]]; then
+              echo "Unexpected results payload:" >&2
+              echo "${response}" >&2
+              sleep 5
+              continue
+            fi
+            if [[ "${status}" != "running" ]]; then
+              jq . <<<"${response}" > results.json
+              echo "Scenario finished with status: ${status}"
+              break
+            fi
+            sleep 5
+          done
+          if [[ ! -f results.json ]]; then
+            echo "Timed out waiting ${RESULTS_TIMEOUT_MINUTES} minutes for scenario results" >&2
+            exit 1
+          fi
+          if [[ "${status}" != "completed" ]]; then
+            exit 1
+          fi
+
+      - name: Stop scenario
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose -f "${AMBER_COMPOSE_DIR}/compose.yaml" -p "${AMBER_COMPOSE_PROJECT}" down -v --remove-orphans
+
+      - name: Add participants to results
+        run: |
+          participants=$(jq '.metadata.agentbeats_ids // {}' "${{ steps.scenario.outputs.path }}")
+          jq --argjson participants "$participants" '. + {participants: $participants}' results.json > results-final.json
+          mv results-final.json results.json
+
+      - name: Generate provenance
+        run: |
+          image_digests=$(jq -r '.components[] | select(.program) | "\(.moniker)=\(.program.image)"' scenario-ir.json | while IFS='=' read -r name image; do
+            digest=$(docker image inspect "$image" --format '{{index .RepoDigests 0}}')
+            printf '%s\t%s\n' "$name" "$digest"
+          done | jq -Rn '[inputs | split("\t") | {(.[0]): .[1]}] | add // {}')
+          timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          manifest_digests=$(jq '[.components[] | {(.moniker): .digest}] | add // {}' scenario-ir.json)
+          jq -n \
+            --argjson image_digests "$image_digests" \
+            --argjson manifest_digests "$manifest_digests" \
+            --arg timestamp "$timestamp" \
+            --arg run_url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --arg ref "${{ github.ref }}" \
+            --arg sha "${{ github.sha }}" \
+            --arg repository_url "${{ github.server_url }}/${{ github.repository }}" \
+            --arg workflow_ref "${{ github.workflow_ref }}" \
+            --arg workflow_sha "${{ github.workflow_sha }}" \
+            '{
+              image_digests: $image_digests,
+              manifest_digests: $manifest_digests,
+              timestamp: $timestamp,
+              github_actions: {
+                run_url: $run_url,
+                ref: $ref,
+                sha: $sha,
+                repository_url: $repository_url,
+                workflow_ref: $workflow_ref,
+                workflow_sha: $workflow_sha
+              }
+            }' > provenance.json
+
+      - name: Upload shard result
+        uses: actions/upload-artifact@v4
+        with:
+          name: shard-${{ matrix.shard_index }}
+          path: |
+            results.json
+            provenance.json
+
+  submit:
+    runs-on: ubuntu-latest
+    needs: run
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: Resolve submission ID
+        id: submission
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref_name="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}"
+          if [[ "$ref_name" =~ ^quick-submit-([0-9a-fA-F-]{36})$ ]]; then
+            echo "submission_id=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Unable to derive submission ID from branch: $ref_name" >&2
+          exit 1
+
+      - name: Find scenario file
+        id: scenario
+        shell: bash
+        env:
+          SUBMISSION_ID: ${{ steps.submission.outputs.submission_id }}
+        run: |
+          set -euo pipefail
+          scenario=$(ls submissions/*"${SUBMISSION_ID}"*.json 2>/dev/null | grep -v provenance | head -1)
+          if [[ -z "$scenario" ]]; then
+            echo "No scenario file found for submission ${SUBMISSION_ID}" >&2
+            exit 1
+          fi
+          base=$(basename "$scenario" .json)
+          echo "path=$scenario" >> "$GITHUB_OUTPUT"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+
+      - name: Download shard results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: shard-*
+          path: shard-results
+
+      - name: Aggregate shard results
+        run: |
+          # Sum up overall and per_domain sum/count across shards, then compute success_rate.
+          # results[0].overall and results[0].per_domain values are {sum, count} objects,
+          # matching the format produced by the green agent and expected by the leaderboard.
+          shard_files=$(for i in $(seq 0 $(( ${{ env.NUM_SHARDS }} - 1 ))); do echo "shard-results/shard-${i}/results.json"; done)
+          # Verify participants are identical across all shards
+          expected_participants=$(jq '.participants' shard-results/shard-0/results.json)
+          for shard_file in $shard_files; do
+            got=$(jq '.participants' "$shard_file")
+            if [ "$got" != "$expected_participants" ]; then
+              echo "Error: participants mismatch in $shard_file" >&2
+              exit 1
+            fi
+          done
+          jq -s '
+            (map(.results[0])) as $shards |
+            ($shards | map(.overall.sum) | add) as $sum |
+            ($shards | map(.overall.count) | add) as $count |
+            {
+              participants: (.[0].participants // {}),
+              results: [{
+                overall: {sum: $sum, count: $count},
+                success_rate: (if $count > 0 then $sum / $count else 0.0 end),
+                per_domain: (
+                  $shards | map(.per_domain) | reduce .[] as $d ({};
+                    . as $acc | reduce ($d | keys[]) as $k ($acc;
+                      .[$k].sum += $d[$k].sum |
+                      .[$k].count += $d[$k].count
+                    )
+                  )
+                )
+              }]
+            }
+          ' $shard_files > results.json
+
+      - name: Aggregate provenance
+        run: |
+          # image_digests and github_actions must be identical across shards;
+          # collect shard_timestamps and shard_manifest_digests arrays.
+          shard_files=$(for i in $(seq 0 $(( ${{ env.NUM_SHARDS }} - 1 ))); do echo "shard-results/shard-${i}/provenance.json"; done)
+          expected_image_digests=$(jq '.image_digests' shard-results/shard-0/provenance.json)
+          expected_github_actions=$(jq '.github_actions' shard-results/shard-0/provenance.json)
+          timestamps='[]'
+          manifest_digests='[]'
+          for shard_file in $shard_files; do
+            got=$(jq '.image_digests' "$shard_file")
+            if [ "$got" != "$expected_image_digests" ]; then
+              echo "Error: image_digests mismatch in $shard_file" >&2; exit 1
+            fi
+            got=$(jq '.github_actions' "$shard_file")
+            if [ "$got" != "$expected_github_actions" ]; then
+              echo "Error: github_actions mismatch in $shard_file" >&2; exit 1
+            fi
+            ts=$(jq '.timestamp' "$shard_file")
+            timestamps=$(echo "$timestamps" | jq --argjson ts "$ts" '. + [$ts]')
+            md=$(jq '.manifest_digests' "$shard_file")
+            manifest_digests=$(echo "$manifest_digests" | jq --argjson md "$md" '. + [$md]')
+          done
+          jq -n \
+            --argjson image_digests "$expected_image_digests" \
+            --argjson shard_manifest_digests "$manifest_digests" \
+            --argjson shard_timestamps "$timestamps" \
+            --argjson github_actions "$expected_github_actions" \
+            '{
+              image_digests: $image_digests,
+              shard_manifest_digests: $shard_manifest_digests,
+              shard_timestamps: $shard_timestamps,
+              github_actions: $github_actions
+            }' > provenance.json
+
+      - name: Commit results
+        env:
+          BASE: ${{ steps.scenario.outputs.base }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          mkdir -p results
+          mv results.json "results/${BASE}.json"
+          mv provenance.json "submissions/${BASE}-provenance.json"
+          git add "results/${BASE}.json" "submissions/${BASE}-provenance.json"
+          git commit -m "[AgentBeats] Scenario results"
+          git push

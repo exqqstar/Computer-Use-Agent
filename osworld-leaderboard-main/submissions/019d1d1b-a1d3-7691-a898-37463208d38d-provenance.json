@@ -1,0 +1,47 @@
+{
+  "image_digests": {
+    "/agent": "ghcr.io/rdi-foundation/osworld-dummy-purple@sha256:7c45c59bf1ba9b87541e3941010b1a7ea96333c7cd81f8ae2aa3baf2e6d66e3f",
+    "/gateway": "ghcr.io/rdi-foundation/agentbeats-gateway@sha256:3f9976889c598092dc4273312ec431cbc48bbe064ff65b5613425f4990bc1d4c",
+    "/green": "ghcr.io/rdi-foundation/osworld-green@sha256:5967e6e566c5fe97b48ba16adf0ec94b74e5ac21663a5ce1551f4d9bf3fbd90f"
+  },
+  "shard_manifest_digests": [
+    {
+      "/": "sha256:zB6OFOjJeY9o/d4FarcJ6sTqiWEdaVpRpGNW26UiYA4=",
+      "/agent": "sha256:Buhlhco9prtLXNbxF6c9r2lBN2lPanXLDCmqtTbF7Ew=",
+      "/gateway": "sha256:0nK+Cnn/T4UOQIP2JqNrAx8gHGVWjBsCUTBFgYgC44c=",
+      "/green": "sha256:OLx25tDQ9OFE+fgVtiCZiUzjGZ+7yFrdfAAQ2sYB2Wo="
+    },
+    {
+      "/": "sha256:FoiOR0fduZaw8NStXIaFO5fdCRHUzrqpICh1lda3qtk=",
+      "/agent": "sha256:Buhlhco9prtLXNbxF6c9r2lBN2lPanXLDCmqtTbF7Ew=",
+      "/gateway": "sha256:0nK+Cnn/T4UOQIP2JqNrAx8gHGVWjBsCUTBFgYgC44c=",
+      "/green": "sha256:OLx25tDQ9OFE+fgVtiCZiUzjGZ+7yFrdfAAQ2sYB2Wo="
+    },
+    {
+      "/": "sha256:hpPCYWXT9mMqWJlHr9ngbDUb1P9e8WTfDL05kVw9vvg=",
+      "/agent": "sha256:Buhlhco9prtLXNbxF6c9r2lBN2lPanXLDCmqtTbF7Ew=",
+      "/gateway": "sha256:0nK+Cnn/T4UOQIP2JqNrAx8gHGVWjBsCUTBFgYgC44c=",
+      "/green": "sha256:OLx25tDQ9OFE+fgVtiCZiUzjGZ+7yFrdfAAQ2sYB2Wo="
+    },
+    {
+      "/": "sha256:lu5AlNNdBzQ8ht6lUv6BrPIfBW19erukQAsPw9+wc+k=",
+      "/agent": "sha256:Buhlhco9prtLXNbxF6c9r2lBN2lPanXLDCmqtTbF7Ew=",
+      "/gateway": "sha256:0nK+Cnn/T4UOQIP2JqNrAx8gHGVWjBsCUTBFgYgC44c=",
+      "/green": "sha256:OLx25tDQ9OFE+fgVtiCZiUzjGZ+7yFrdfAAQ2sYB2Wo="
+    }
+  ],
+  "shard_timestamps": [
+    "2026-03-24T18:03:08Z",
+    "2026-03-24T18:13:48Z",
+    "2026-03-24T18:06:04Z",
+    "2026-03-24T18:06:22Z"
+  ],
+  "github_actions": {
+    "run_url": "https://github.com/RDI-Foundation/osworld-leaderboard/actions/runs/23465930039",
+    "ref": "refs/pull/6/merge",
+    "sha": "c8801839ae43a5e01bd86737cadec58a64bed872",
+    "repository_url": "https://github.com/RDI-Foundation/osworld-leaderboard",
+    "workflow_ref": "RDI-Foundation/osworld-leaderboard/.github/workflows/quick-submit.yml@refs/pull/6/merge",
+    "workflow_sha": "c8801839ae43a5e01bd86737cadec58a64bed872"
+  }
+}

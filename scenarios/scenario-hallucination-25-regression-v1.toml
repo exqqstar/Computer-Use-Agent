@@ -1,0 +1,22 @@
+[green_agent]
+endpoint = "http://127.0.0.1:8081"
+cmd = "python src/green_car_bench_agent/server.py --host 127.0.0.1 --port 8081"
+
+[[participants]]
+role = "agent"
+endpoint = "http://127.0.0.1:8080"
+cmd = "python src/purple_car_bench_agent/server.py --host 127.0.0.1 --port 8080 --agent-llm openai/MiniMax-M2.7 --temperature 0.0"
+
+[config]
+num_trials = 1
+task_split = "test"
+user_model = "openai/MiniMax-M2.7"
+user_provider = "openai"
+user_thinking = false
+policy_evaluator_model = "openai/MiniMax-M2.7"
+policy_evaluator_provider = "openai"
+tasks_base_num_tasks = 0
+tasks_hallucination_num_tasks = 0
+tasks_disambiguation_num_tasks = 0
+tasks_hallucination_task_id_filter = ["hallucination_25"]
+max_steps = 50

@@ -1,0 +1,92 @@
+{
+  manifest_version: "0.1.0",
+
+  // Runtime config requested from the deployer.
+  // Keep these generic so the same purple image can be reused across AgentBeats
+  // benchmarks without embedding provider-specific logic in the manifest itself.
+  config_schema: {
+    type: "object",
+    properties: {
+      agent_llm: {
+        type: "string",
+        default: "gemini/gemini-2.5-flash",
+      },
+      agent_temperature: {
+        type: "number",
+        default: 0.0,
+      },
+      agent_reasoning_effort: {
+        type: "string",
+        default: "medium",
+      },
+      agent_api_base: {
+        type: "string",
+      },
+      agent_api_key: {
+        type: "string",
+        secret: true,
+      },
+      openai_api_key: {
+        type: "string",
+        secret: true,
+      },
+      gemini_api_key: {
+        type: "string",
+        secret: true,
+      },
+      anthropic_api_key: {
+        type: "string",
+        secret: true,
+      },
+    },
+    required: [],
+    additionalProperties: false,
+  },
+
+  // Optional A2A gateway/proxy binding used by Amber scenarios.
+  slots: {
+    proxy: { kind: "a2a" },
+  },
+
+  program: {
+    // Assuming you publish from the public GitHub repo:
+    //   exqqstar/Computer-Use-Agent
+    // and keep the current publish workflow naming convention.
+    // GHCR image names should be lower-case.
+    image: "ghcr.io/exqqstar/computer-use-agent-car-bench-agent:latest",
+    entrypoint: "uv run src/purple_car_bench_agent/server.py --host 0.0.0.0 --port 8080",
+
+    env: {
+      PYTHONUNBUFFERED: "1",
+      AGENT_LLM: "${config.agent_llm}",
+      AGENT_TEMPERATURE: "${config.agent_temperature}",
+      AGENT_REASONING_EFFORT: "${config.agent_reasoning_effort}",
+      AGENT_API_BASE: "${config.agent_api_base}",
+      AGENT_API_KEY: "${config.agent_api_key}",
+      OPENAI_API_KEY: "${config.openai_api_key}",
+      GEMINI_API_KEY: "${config.gemini_api_key}",
+      ANTHROPIC_API_KEY: "${config.anthropic_api_key}",
+
+      // Included so Amber permits proxy wiring when a scenario exposes one.
+      AMBER_HINT_PROXY: "${slots.proxy}",
+    },
+
+    network: {
+      endpoints: [
+        { name: "a2a_endpoint", port: 8080 },
+      ],
+    },
+  },
+
+  provides: {
+    a2a: { kind: "a2a", endpoint: "a2a_endpoint" },
+  },
+
+  exports: { a2a: "a2a" },
+
+  metadata: {
+    role: "purple",
+    framework: "agentbeats",
+    description: "Shared-kernel purple agent entrypoint for CAR-bench and future track adapters.",
+  },
+}

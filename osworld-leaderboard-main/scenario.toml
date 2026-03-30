@@ -1,0 +1,13 @@
+[green_agent]
+image = "ghcr.io/rdi-foundation/osworld-green:latest"
+env = {}
+
+[[participants]]
+image = "ghcr.io/rdi-foundation/osworld-purple:latest"
+name = "agent"
+
+[participants.env]
+MAX_CONTEXTS = "5"
+
+[config]
+# Add your assessment config here
